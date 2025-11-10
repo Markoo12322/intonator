@@ -1,0 +1,287 @@
+
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Intonator – PWA</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0f1220" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <style>
+    :root{--bg:#0f1220;--card:#171a2b;--accent:#8ae;--ok:#43d17c;--warn:#ffb020;--bad:#ff5b6e;--text:#eef2ff}
+    *{box-sizing:border-box} body{margin:0;background:linear-gradient(180deg,#0e1020,#0b0d19);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif}
+    header{padding:20px 16px;text-align:center}
+    h1{margin:0;font-size:28px;letter-spacing:.5px}
+    .wrap{max-width:980px;margin:0 auto;padding:16px;display:grid;gap:16px}
+    .card{background:var(--card);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    label{font-size:14px;opacity:.9}
+    select,button,input[type=number]{background:#0f1326;color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:10px 12px;font-size:14px}
+    button{cursor:pointer}
+    button.primary{background:var(--accent);color:#08111f;border:none;font-weight:600}
+    button.warn{background:var(--warn);color:#201400;border:none;font-weight:600}
+    .grid{display:grid;gap:12px}
+    .grid.cols2{grid-template-columns:repeat(2,minmax(0,1fr))}
+    @media (max-width:800px){.grid.cols2{grid-template-columns:1fr}}
+    .meter{height:16px;background:#101426;border-radius:999px;position:relative;border:1px solid rgba(255,255,255,.08);overflow:hidden}
+    .fill{position:absolute;left:50%;top:0;height:100%;width:2px;background:var(--accent)}
+    .target{position:absolute;left:50%;top:-2px;height:20px;width:2px;background:var(--ok)}
+    .scale{display:flex;justify-content:space-between;font-size:12px;opacity:.8;margin-top:6px}
+    .pill{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.12);background:#0f1326;padding:6px 10px;border-radius:999px;font-size:13px}
+    .muted{opacity:.8}
+    .note{display:inline-block;min-width:64px}
+    .footer{opacity:.7;font-size:12px;text-align:center;padding:12px}
+    .hr{height:1px;background:rgba(255,255,255,.08);margin:10px 0}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Intonator — PWA</h1>
+    <div class="muted">Dopusti mikrofon, izaberi interval i probaj otpjevati točno. Radi offline nakon prvog otvaranja.</div>
+  </header>
+  <main class="wrap">
+    <section class="card grid cols2">
+      <div>
+        <h2>1) Postavke</h2>
+        <div class="row"><label>Početni ton</label>
+          <select id="rootSelect"></select>
+        </div>
+        <div class="row"><label>Interval</label>
+          <select id="intervalSelect"></select>
+          <select id="directionSelect">
+            <option value="up">Uzlazno</option>
+            <option value="down">Silazno</option>
+          </select>
+        </div>
+        <div class="row">
+          <label>Tolerancija (centi)</label>
+          <input type="number" id="tolerance" value="30" min="5" max="100" step="1" style="width:100px">
+          <button id="playRef" class="pill">▶️ Referentni ton</button>
+        </div>
+        <div class="row">
+          <button id="startBtn" class="primary">🎙️ Kreni s testom</button>
+          <button id="randomBtn" class="warn">🎲 Nasumično</button>
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <div class="pill">Ciljna frekvencija: <span id="targetHz" class="note">—</span></div>
+          <div class="pill">Trenutno: <span id="currentHz" class="note">—</span></div>
+          <div class="pill">Odstupanje: <span id="cents" class="note">—</span> centi</div>
+        </div>
+      </div>
+      <div>
+        <h2>2) Tuner & bodovi</h2>
+        <div class="meter"><div class="target"></div><div class="fill" id="needle"></div></div>
+        <div class="scale"><span>-50c</span><span>0</span><span>+50c</span></div>
+        <div style="margin-top:10px" class="row">
+          <div class="pill">Bodovi: <span id="score">0</span></div>
+          <div class="pill">Combo: <span id="combo">0</span></div>
+          <div class="pill">Najbolje: <span id="best">0</span></div>
+        </div>
+        <p class="muted">Savjet: počni s čistim intervalima (P4/P5/8va), pa prijeđi na terce i sekste.</p>
+      </div>
+    </section>
+    <section class="footer">© Intonator PWA — lokalna obrada u pregledniku. Treba HTTPS za mikrofon.</section>
+  </main>
+
+<script>
+(() => {
+  // PWA: register service worker
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('sw.js'));
+  }
+
+  const A4 = 440;
+  const noteNames = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  function midiToFreq(m){ return A4 * Math.pow(2,(m-69)/12); }
+  function freqToCentsDelta(f, target){ return 1200 * Math.log2(f/target); }
+  function midiToName(m){ const o=Math.floor(m/12)-1; return noteNames[m%12] + o; }
+
+  const ROOT_MIN = 48; // C3
+  const ROOT_MAX = 69; // A4
+  const intervals = [
+    {name:'Unison', st:0},{name:'m2', st:1},{name:'M2', st:2},{name:'m3', st:3},{name:'M3', st:4},
+    {name:'P4', st:5},{name:'TT', st:6},{name:'P5', st:7},{name:'m6', st:8},{name:'M6', st:9},
+    {name:'m7', st:10},{name:'M7', st:11},{name:'8va', st:12},
+  ];
+
+  const rootSel = document.getElementById('rootSelect');
+  const intSel = document.getElementById('intervalSelect');
+  const dirSel = document.getElementById('directionSelect');
+  const toleranceInput = document.getElementById('tolerance');
+  const playRefBtn = document.getElementById('playRef');
+  const startBtn = document.getElementById('startBtn');
+  const randomBtn = document.getElementById('randomBtn');
+  const targetHzEl = document.getElementById('targetHz');
+  const currentHzEl = document.getElementById('currentHz');
+  const centsEl = document.getElementById('cents');
+  const needle = document.getElementById('needle');
+  const scoreEl = document.getElementById('score');
+  const comboEl = document.getElementById('combo');
+  const bestEl = document.getElementById('best');
+
+  for(let m=ROOT_MIN;m<=ROOT_MAX;m++){
+    const opt=document.createElement('option');
+    opt.value=m; opt.textContent=`${midiToName(m)} (${Math.round(midiToFreq(m))} Hz)`;
+    rootSel.appendChild(opt);
+  }
+  rootSel.value=60;
+  intervals.forEach(iv=>{
+    const opt=document.createElement('option');
+    opt.value=iv.st; opt.textContent=`${iv.name} (${iv.st})`;
+    intSel.appendChild(opt);
+  });
+  intSel.value=7;
+
+  let audioCtx=null, osc=null, analyser=null, micSource=null;
+  let timeDomain;
+  let listening=false;
+  let targetFreq=null;
+  let score=0, combo=0, best=0;
+
+  function ensureAudio(){
+    if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  }
+  function playTone(freq, dur=1.0){
+    ensureAudio();
+    if(osc){ try{osc.stop();}catch{} }
+    osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    gain.gain.value=0.12;
+    osc.type='sine';
+    osc.frequency.value=freq;
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime+dur);
+  }
+  async function startMic(){
+    ensureAudio();
+    const stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true, noiseSuppression:true}});
+    micSource = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 4096;
+    timeDomain = new Float32Array(analyser.fftSize);
+    micSource.connect(analyser);
+  }
+
+  function autoCorrelateFloat(buf, sampleRate){
+    const SIZE = buf.length;
+    let rms=0;
+    for(let i=0;i<SIZE;i++){ const v=buf[i]; rms+=v*v; }
+    rms = Math.sqrt(rms/SIZE);
+    if(rms<0.01) return -1;
+    let r1=0,r2=SIZE-1,th=0.2;
+    for(let i=0;i<SIZE/2;i++){ if(Math.abs(buf[i])<th){ r1=i; break; } }
+    for(let i=1;i<SIZE/2;i++){ if(Math.abs(buf[SIZE-i])<th){ r2=SIZE-i; break; } }
+    buf = buf.slice(r1, r2);
+    const N = buf.length;
+    if(N<32) return -1;
+    const c = new Array(N).fill(0);
+    for(let i=0;i<N;i++){
+      let sum=0; for(let j=0;j<N-i;j++) sum+=buf[j]*buf[j+i];
+      c[i]=sum;
+    }
+    let d=0; while(d<N-1 && c[d]>c[d+1]) d++;
+    let maxv=-1,maxp=-1;
+    for(let i=d;i<N;i++){ if(c[i]>maxv){ maxv=c[i]; maxp=i; } }
+    if(maxp<=0) return -1;
+    const x1=c[maxp-1]||0, x2=c[maxp], x3=c[maxp+1]||0;
+    const a=(x1+x3-2*x2)/2, b=(x3-x1)/2;
+    let t0=maxp; if(a) t0 = maxp - b/(2*a);
+    const freq = sampleRate/t0;
+    if(freq<50||freq>1400) return -1;
+    return freq;
+  }
+
+  function setTargetFromUI(){
+    const rootMidi = parseInt(rootSel.value,10);
+    const st = parseInt(intSel.value,10);
+    const dir = dirSel.value;
+    const targetMidi = dir==='up' ? rootMidi+st : rootMidi-st;
+    targetFreq = midiToFreq(targetMidi);
+    targetHzEl.textContent = `${Math.round(targetFreq)} Hz (${midiToName(targetMidi)})`;
+  }
+
+  function updateMeters(curFreq){
+    if(!targetFreq || curFreq<=0){
+      currentHzEl.textContent='—';
+      centsEl.textContent='—';
+      needle.style.left='50%';
+      return;
+    }
+    currentHzEl.textContent = `${Math.round(curFreq)} Hz`;
+    const deltaCents = freqToCentsDelta(curFreq, targetFreq);
+    const clamped = Math.max(-50, Math.min(50, deltaCents));
+    needle.style.left = (50 + clamped) + '%';
+    centsEl.textContent = `${deltaCents.toFixed(1)}`;
+  }
+
+  function addScore(deltaCents){
+    const tol = parseInt(document.getElementById('tolerance').value,10);
+    const abs = Math.abs(deltaCents);
+    if(abs <= tol){
+      const quality = Math.max(0,(tol-abs)/tol);
+      const gained = Math.round(50 + 150*quality);
+      combo += 1;
+      score += Math.round(gained * (1 + Math.floor(combo/5)*0.25));
+    } else {
+      combo = 0;
+    }
+    best = Math.max(best, score);
+    scoreEl.textContent = Math.round(score);
+    comboEl.textContent = combo;
+    bestEl.textContent = Math.round(best);
+  }
+
+  async function listenLoop(){
+    if(!analyser){ await startMic(); }
+    listening = true;
+    const sr = audioCtx.sampleRate;
+    const tick = () => {
+      if(!listening) return;
+      analyser.getFloatTimeDomainData(timeDomain);
+      const f = autoCorrelateFloat(timeDomain, sr);
+      if(f>0){
+        updateMeters(f);
+        if(targetFreq){
+          const dc = freqToCentsDelta(f, targetFreq);
+          const tol = parseInt(document.getElementById('tolerance').value,10);
+          if(Math.abs(dc)<=tol){ addScore(dc); }
+        }
+      } else {
+        updateMeters(-1);
+      }
+      requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  function randomize(){
+    const root = Math.floor(ROOT_MIN + Math.random()*(ROOT_MAX-ROOT_MIN+1));
+    const intv = intervals[Math.floor(Math.random()*intervals.length)];
+    const dir = Math.random()<0.5 ? 'up' : 'down';
+    rootSel.value = root;
+    intSel.value = intv.st;
+    dirSel.value = dir;
+    setTargetFromUI();
+    playTone(midiToFreq(parseInt(rootSel.value,10)), 0.6);
+    setTimeout(()=>{ if(targetFreq) playTone(targetFreq,0.8); }, 700);
+  }
+
+  // Events
+  setTargetFromUI();
+  rootSel.addEventListener('change', setTargetFromUI);
+  intSel.addEventListener('change', setTargetFromUI);
+  dirSel.addEventListener('change', setTargetFromUI);
+  playRefBtn.addEventListener('click', ()=>{
+    const f = midiToFreq(parseInt(rootSel.value,10));
+    playTone(f,0.6);
+    setTimeout(()=>{ if(targetFreq) playTone(targetFreq,0.8); }, 700);
+  });
+  startBtn.addEventListener('click', ()=>{ setTargetFromUI(); listenLoop(); });
+  randomBtn.addEventListener('click', ()=> randomize() );
+})();
+</script>
+</body>
+</html>
